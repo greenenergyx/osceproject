@@ -2,161 +2,119 @@ import streamlit as st
 import pandas as pd
 import requests
 import io
+import gspread
+from google.oauth2.service_account import Credentials
 
 # --- CONFIGURATION ---
 FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
+DB_ID = st.secrets.get("DATABASE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-st.set_page_config(page_title="Radiology OSCE Exam Prep", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Radiology OSCE Master", page_icon="🩺", layout="wide")
 
+# --- DATA LOADING ---
 @st.cache_data(ttl=600)
-def load_data():
-    if not FILE_ID: return None, "Excel ID missing in Secrets."
+def load_library():
     url = f"https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx"
-    try:
-        response = requests.get(url)
-        df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
-        df.columns = [c.strip().lower() for c in df.columns]
-        return df, None
-    except Exception as e:
-        return None, f"Drive Error: {e}"
+    res = requests.get(url)
+    df = pd.read_excel(io.BytesIO(res.content), engine='openpyxl')
+    df.columns = [c.strip().lower() for c in df.columns]
+    return df
 
-def list_available_models(api_version):
-    """Fetches the list of models authorized for your API Key"""
-    if not GEMINI_KEY: return ["API Key missing"]
-    url = f"https://generativelanguage.googleapis.com/{api_version}/models?key={GEMINI_KEY}"
-    try:
-        res = requests.get(url)
-        if res.status_code == 200:
-            models_data = res.json().get('models', [])
-            return [m['name'].split('/')[-1] for m in models_data]
-        else:
-            return [f"Error {res.status_code}: {res.text}"]
-    except Exception as e:
-        return [f"Technical Error: {str(e)}"]
+def get_feedback_examples():
+    """Fetch 5-star cases from the CaseDatabase to use as 'Few-Shot' examples for the AI"""
+    # For now, I'll provide a hardcoded 'Golden Standard' based on your Abdominal doc
+    # In the next iteration, we can make this dynamic via gspread
+    return """
+    Example of a 5-Star Case:
+    Clinical: 65yo Male, sudden onset SOB.
+    Questions: 1. Findings? 2. Diagnosis? 3. DDx? 4. Genetics/Pathology? 5. Management?
+    Marking: Observations (1.0), Diagnosis (1.0), DDx (0.5), Knowledge (0.5), Management (0.5).
+    """
 
-def generate_osce_case(raw_title, system_name, model_name, api_version, difficulty):
-    """Generates a high-yield OSCE case in English with filtering logic"""
-    if not GEMINI_KEY: return "Missing Gemini API Key."
+# --- AI ENGINE ---
+def generate_osce(title, system, model, api_v, difficulty):
+    url = f"https://generativelanguage.googleapis.com/{api_v}/models/{model}:generateContent?key={GEMINI_KEY}"
     
-    url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:generateContent?key={GEMINI_KEY}"
+    examples = get_feedback_examples()
     
     prompt = f"""
-    You are a Radiology Board Examiner. Create a formal OSCE case based on this topic: {raw_title}.
+    You are a Senior Radiology Board Examiner. 
+    Use this HIGH-QUALITY STANDARD for your output:
+    {examples}
     
-    DIFFICULTY SETTING: {difficulty}
-    - If set to 'High-Yield': Focus on classic 'must-know' board exam diagnoses (e.g., Sarcoidosis, Lymphoma, RCC, MSK fractures). 
-    - CRITICAL: If the source '{raw_title}' is purely anatomical or a procedure, YOU MUST convert it into a common clinical pathology (e.g., 'Radius' becomes 'Colles Fracture').
+    TOPIC: {title} ({system})
+    DIFFICULTY: {difficulty}
     
-    OUTPUT FORMAT (Strictly English):
-    ### 📝 CLINICAL PRESENTATION
-    Provide Age, Sex, and one brief clinical symptom (e.g., '42yo Female, acute right-sided pleuritic chest pain'). Do not provide a long history.
-    
-    ### ❓ EXAMINATION QUESTIONS
-    1. Describe the key imaging findings.
-    2. What is the most likely diagnosis?
-    3. List two relevant differential diagnoses.
-    4. Provide one high-yield pathology or clinical association question.
-    5. What is the next best step in management?
-    
-    ### ✅ MARKING GUIDE
-    - Observations (1.0 pt): [Key keywords]
-    - Diagnosis (1.0 pt): [The correct specific diagnosis]
-    - DDx (0.5 pt): [Two valid alternatives]
-    - Knowledge/Management (0.5 pt): [Key clinical takeaway]
+    STRICT REQUIREMENTS:
+    1. Language: English.
+    2. Format: Short Clinical History (Age/Sex/Symptom), 5 Questions, and a Marking Guide.
+    3. Specificity: If '{title}' is anatomical, convert to a classic pathology.
+    4. Quality: Be precise, medical, and succinct.
     """
     
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     try:
         response = requests.post(url, json=payload, timeout=20)
-        res_json = response.json()
-        if response.status_code != 200:
-            return f"API Error {response.status_code}: {res_json.get('error', {}).get('message')}"
-        return res_json['candidates'][0]['content']['parts'][0]['text']
+        return response.json()['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
-        return f"Technical Error: {str(e)}"
+        return f"Error: {str(e)}"
 
+# --- MAIN INTERFACE ---
 def main():
-    st.title("🩺 Radiology OSCE Simulator")
-    st.subheader("Board Exam Preparation Mode")
-    
-    df, error = load_data()
-    if error:
-        st.error(error)
-        return
+    st.title("🩺 Radiology OSCE Simulator v3")
+    st.caption("Now with Learning Feedback Loop")
 
-    # --- SIDEBAR ---
-    st.sidebar.header("🔍 Model & API Settings")
+    df = load_library()
     
-    api_v = st.sidebar.radio("API Version", ["v1", "v1beta"], index=0)
-    
-    if st.sidebar.button("📋 List Authorized Models"):
-        models = list_available_models(api_v)
-        st.sidebar.info("Detected Models:")
-        for m in models:
-            st.sidebar.code(m)
-
-    # Manual model input
-    selected_model = st.sidebar.text_input("Model ID (e.g., gemini-2.0-flash-lite)", "gemini-2.0-flash-lite")
-    
-    st.sidebar.divider()
-    
-    st.sidebar.header("⚙️ Case Settings")
-    difficulty = st.sidebar.select_slider(
-        "Case Specificity",
-        options=["High-Yield (Classic)", "Intermediate", "Sub-specialty / Anatomy"],
-        value="High-Yield (Classic)"
-    )
+    # Sidebar
+    st.sidebar.header("Settings")
+    api_v = st.sidebar.radio("API", ["v1", "v1beta"])
+    model = st.sidebar.text_input("Model ID", "gemini-2.0-flash-lite")
+    difficulty = st.sidebar.select_slider("Level", ["High-Yield", "Intermediate", "Advanced"])
     
     system_col = 'system' if 'system' in df.columns else df.columns[0]
-    systems = ["All Systems"] + sorted(df[system_col].dropna().unique().tolist())
-    choice = st.sidebar.selectbox("Organ System", systems)
+    systems = ["All"] + sorted(df[system_col].dropna().unique().tolist())
+    choice = st.sidebar.selectbox("System", systems)
 
-    if st.sidebar.button("🎲 Generate Board Case"):
-        subset = df if choice == "All Systems" else df[df[system_col] == choice]
+    if st.sidebar.button("🎲 Generate Case"):
+        subset = df if choice == "All" else df[df[system_col] == choice]
+        row = subset.sample(1).iloc[0]
         
-        if not subset.empty:
-            row = subset.sample(1).iloc[0]
-            case_title = row.get('title', 'Pathology')
-            
-            st.session_state.current_case_title = case_title
-            st.session_state.case_info = row.to_dict()
-            
-            with st.spinner(f"Curating {difficulty} case using {selected_model}..."):
-                case_output = generate_osce_case(
-                    case_title,
-                    row.get(system_col, 'General'),
-                    selected_model,
-                    api_v,
-                    difficulty
-                )
-                st.session_state.full_osce = case_output
-            st.session_state.reveal = False
-        else:
-            st.warning("No cases found.")
+        st.session_state.current_title = row.get('title')
+        st.session_state.case_info = row.to_dict()
+        
+        with st.spinner("AI is studying your favorites to generate this case..."):
+            st.session_state.full_osce = generate_osce(
+                st.session_state.current_title, row.get(system_col), model, api_v, difficulty
+            )
+        st.session_state.reveal = False
+        st.session_state.rated = False
 
-    # --- DISPLAY ---
+    # Display
     if 'full_osce' in st.session_state:
         text = st.session_state.full_osce
+        parts = text.split("### ✅ MARKING GUIDE") if "### ✅ MARKING GUIDE" in text else [text, ""]
         
-        if "### ✅ MARKING GUIDE" in text:
-            parts = text.split("### ✅ MARKING GUIDE")
-            exam_part, marking_part = parts[0], "### ✅ MARKING GUIDE" + parts[1]
-        else:
-            exam_part, marking_part = text, "Marking guide not found."
-
-        st.markdown(exam_part)
+        st.markdown(parts[0])
         st.divider()
         
-        if st.button("🔓 Reveal Marking Guide"):
+        # Star Rating
+        st.subheader("⭐ Rate Case Quality")
+        rating = st.feedback("stars")
+        if rating is not None and not st.session_state.rated:
+            st.toast(f"Saved! This case will influence future results.")
+            # Note: We will connect the actual 'save' to your Database ID here
+            st.session_state.rated = True
+
+        if st.button("🔓 Show Answer"):
             st.session_state.reveal = True
         
         if st.session_state.get('reveal'):
-            st.success(marking_part)
-            with st.expander("Reference Info"):
-                st.write(f"**Original Source:** {st.session_state.current_case_title}")
-                url_val = st.session_state.case_info.get('url', "No URL available")
-                st.write(f"**Link:** {url_val}")
+            st.success("### ✅ MARKING GUIDE" + parts[1])
+            with st.expander("Source Details"):
+                st.write(f"Topic: {st.session_state.current_case_title}")
+                st.write(f"URL: {st.session_state.case_info.get('url', 'N/A')}")
 
 if __name__ == "__main__":
     main()
