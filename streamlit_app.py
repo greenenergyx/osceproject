@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import io
 
-# --- CONFIGURATION DES SECRETS ---
+# --- CONFIGURATION ---
 FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
@@ -11,7 +11,7 @@ st.set_page_config(page_title="Radiology OSCE Generator", page_icon="🩺", layo
 
 @st.cache_data(ttl=600)
 def load_data():
-    if not FILE_ID: return None, "ID Excel manquant dans les Secrets Streamlit."
+    if not FILE_ID: return None, "ID Excel manquant dans les Secrets."
     url = f'https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx'
     try:
         response = requests.get(url)
@@ -21,35 +21,36 @@ def load_data():
     except Exception as e:
         return None, f"Erreur Drive : {e}"
 
-def generate_osce_content(case_title, system_name):
-    """Génère le cas OSCE via l'API Gemini 1.5 Flash"""
+def generate_osce_content(case_title, system_name, model_name, api_version):
+    """Génère le cas OSCE avec le modèle choisi par l'utilisateur"""
     if not GEMINI_KEY:
-        return "Erreur : Clé API Gemini manquante dans les secrets."
+        return "Erreur : Clé API manquante."
     
-    # URL pour Gemini 1.5 Flash (plus rapide et souvent gratuit selon quota)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    # URL dynamique selon les choix de l'utilisateur
+    url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:generateContent?key={GEMINI_KEY}"
     
     prompt = f"""
-    Tu es un examinateur expert en radiologie (OSCE). 
-    Crée un cas d'examen réel pour le diagnostic : {case_title} (Système : {system_name}).
+    Tu es un examinateur expert en radiologie. 
+    Crée un cas d'examen OSCE structuré pour le diagnostic : {case_title} (Système : {system_name}).
     
-    Structure ta réponse ainsi :
+    Réponds EXACTEMENT avec ce plan :
+    
     ### CLINICAL PRESENTATION
     (Une phrase de contexte clinique pour l'étudiant)
     
     ### EXAMINATION QUESTIONS
-    1. Observations radiologiques ?
-    2. Diagnostic principal ?
-    3. Deux différentiels ?
-    4. Une question de connaissance 'High-yield' ?
-    5. Management ?
+    1. Quelles sont les observations radiologiques ?
+    2. Quel est le diagnostic principal ?
+    3. Citez deux diagnostics différentiels.
+    4. Question de connaissance spécifique (complication ou association).
+    5. Quelle est la conduite à tenir ?
     
     ### MARKING GUIDE
-    - Observations (1.0 pt) : [mots-clés]
-    - Diagnostic (1.0 pt)
-    - Différentiels (0.5 pt)
-    - Knowledge (0.5 pt)
-    - Management (0.5 pt)
+    - Observations (1.0 pt) : [points clés]
+    - Diagnostic (1.0 pt) : [nom exact]
+    - Différentiels (0.5 pt) : [2 alternatives]
+    - Knowledge (0.5 pt) : [réponse question 4]
+    - Management (0.5 pt) : [étape suivante]
     
     Réponds en Français.
     """
@@ -57,13 +58,14 @@ def generate_osce_content(case_title, system_name):
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     try:
-        response = requests.post(url, json=payload, timeout=15)
-        response_data = response.json()
+        response = requests.post(url, json=payload, timeout=20)
+        res_json = response.json()
         
         if response.status_code != 200:
-            return f"Erreur API ({response.status_code}) : {response_data.get('error', {}).get('message', 'Erreur inconnue')}"
+            err_msg = res_json.get('error', {}).get('message', 'Erreur inconnue')
+            return f"Erreur API {response.status_code} ({model_name}) : {err_msg}"
             
-        return response_data['candidates'][0]['content']['parts'][0]['text']
+        return res_json['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
         return f"Erreur technique : {str(e)}"
 
@@ -75,8 +77,23 @@ def main():
         st.error(error)
         return
 
-    # Sidebar
-    st.sidebar.header("Paramètres")
+    # --- SIDEBAR : PARAMÈTRES ET MODÈLES ---
+    st.sidebar.header("⚙️ Configuration")
+    
+    # Choix du modèle IA
+    available_models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-pro"
+    ]
+    selected_model = st.sidebar.selectbox("Modèle Gemini", available_models, index=0)
+    
+    # Choix de la version API
+    api_version = st.sidebar.radio("Version API", ["v1", "v1beta"], index=0, help="Changez si vous avez une erreur 404")
+    
+    st.sidebar.divider()
+    
+    # Filtres de données
     system_col = 'system' if 'system' in df.columns else df.columns[0]
     systems = ["Tous"] + sorted(df[system_col].dropna().unique().tolist())
     choice = st.sidebar.selectbox("Filtrer par système", systems)
@@ -86,23 +103,26 @@ def main():
         if not subset.empty:
             row = subset.sample(1).iloc[0]
             st.session_state.case_info = row.to_dict()
-            with st.spinner("L'IA rédige l'examen..."):
-                res = generate_osce_content(row.get('title', 'Pathologie'), row.get(system_col, 'Radiologie'))
-                st.session_state.full_osce = res
+            with st.spinner(f"L'IA ({selected_model}) prépare le cas..."):
+                st.session_state.full_osce = generate_osce_content(
+                    row.get('title', 'Pathologie'), 
+                    row.get(system_col, 'Radiologie'),
+                    selected_model,
+                    api_version
+                )
             st.session_state.reveal = False
         else:
             st.warning("Aucun cas trouvé.")
 
-    # Affichage
+    # --- AFFICHAGE DU CAS ---
     if 'full_osce' in st.session_state:
         text = st.session_state.full_osce
         
-        # Séparation Énoncé / Correction
         if "### MARKING GUIDE" in text:
             parts = text.split("### MARKING GUIDE")
             enonce, correction = parts[0], "### MARKING GUIDE" + parts[1]
         else:
-            enonce, correction = text, "Grille de correction indisponible."
+            enonce, correction = text, "Barème non disponible."
 
         st.divider()
         c1, c2 = st.columns([2, 1])
@@ -111,15 +131,17 @@ def main():
             st.markdown(enonce)
             
         with c2:
-            st.write("### 🛠️ Actions")
+            st.write("### 🛠️ Outils Examinateur")
             if st.button("🔓 Révéler la Correction"):
                 st.session_state.reveal = True
             
             if st.session_state.get('reveal'):
-                st.success("### Grille de Correction")
+                st.success("### Correction & Barème")
                 st.markdown(correction)
+                with st.expander("Données brutes Radiopaedia"):
+                    st.write(st.session_state.case_info.get('content', 'Pas de description.'))
                 if 'url' in st.session_state.case_info:
-                    st.caption(f"[Article Radiopaedia]({st.session_state.case_info['url']})")
+                    st.caption(f"[Lien Source]({st.session_state.case_info['url']})")
 
 if __name__ == "__main__":
     main()
