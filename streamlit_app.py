@@ -7,11 +7,11 @@ import io
 FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-st.set_page_config(page_title="Radiology OSCE Diagnostic", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Radiology OSCE Generator", page_icon="🩺", layout="wide")
 
 @st.cache_data(ttl=600)
 def load_data():
-    if not FILE_ID: return None, "ID Excel manquant dans les Secrets."
+    if not FILE_ID: return None, "ID Excel manquant."
     url = f"https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx"
     try:
         response = requests.get(url)
@@ -21,101 +21,97 @@ def load_data():
     except Exception as e:
         return None, f"Erreur Drive : {e}"
 
-def list_available_models(api_version):
-    """Interroge l'API pour lister les modèles accessibles avec votre clé"""
-    if not GEMINI_KEY: return ["Clé manquante"]
-    url = f"https://generativelanguage.googleapis.com/{api_version}/models?key={GEMINI_KEY}"
-    try:
-        res = requests.get(url)
-        if res.status_code == 200:
-            models_data = res.json().get('models', [])
-            return [m['name'].split('/')[-1] for m in models_data]
-        else:
-            return [f"Erreur {res.status_code}: {res.text}"]
-    except Exception as e:
-        return [f"Erreur technique : {str(e)}"]
-
-def generate_osce_content(case_title, model_name, api_version):
-    """Génère le cas OSCE structuré"""
+def generate_osce_content(raw_title, model_name, api_version):
+    """Génère un cas filtré et concis au format OSCE réel"""
     url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:generateContent?key={GEMINI_KEY}"
     
     prompt = f"""
-    Tu es un examinateur expert en radiologie (OSCE). 
-    Crée un cas d'examen réel pour le diagnostic : {case_title}.
+    Tu es un examinateur en radiologie. Ton but est de transformer l'article suivant en un cas d'examen court (OSCE).
     
-    Réponds en Français avec ce plan strict :
-    ### CLINICAL PRESENTATION
-    (Contexte pour l'étudiant)
+    ARTICLE ORIGINAL : {raw_title}
     
-    ### EXAMINATION QUESTIONS
-    (5 questions précises)
+    CONSIGNES DE FILTRAGE :
+    1. Si l'article est un organe (ex: Radius) ou une procédure (ex: Pneumonectomie), transforme-le en une pathologie pertinente (ex: Fracture du radius ou Complication de pneumonectomie).
+    2. La présentation clinique doit être TRÈS courte : juste l'âge, le sexe et un motif de consultation (ex: "Homme de 45 ans, dyspnée aiguë").
     
-    ### MARKING GUIDE
-    (Barème détaillé 0.5/1.0 pt)
+    STRUCTURE DE RÉPONSE :
+    ### 📝 CLINICAL PRESENTATION
+    [Âge], [Sexe], [1 symptôme court]
+    
+    ### ❓ QUESTIONS
+    1. Observations principales ?
+    2. Diagnostic ?
+    3. Deux différentiels ?
+    4. Une question théorique courte.
+    5. Management ?
+    
+    ### ✅ MARKING GUIDE
+    - Observations (1.0) : [Mots-clés]
+    - Diagnostic (1.0) : [Le nom de la pathologie]
+    - DDx (0.5) : [2 ddx]
+    - Knowledge/Management (0.5)
+    
+    Réponds en Français.
     """
     
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    
     try:
         response = requests.post(url, json=payload, timeout=20)
         res_json = response.json()
         if response.status_code != 200:
-            msg = res_json.get('error', {}).get('message', 'Inconnu')
-            return f"Erreur API {response.status_code} : {msg}"
+            return f"Erreur API : {res_json.get('error', {}).get('message')}"
         return res_json['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
         return f"Erreur technique : {str(e)}"
 
 def main():
-    st.title("🩺 Radiology OSCE Generator & Diagnostic")
+    st.title("🩺 Radiology OSCE Simulator (Short-Case)")
     
     df, error = load_data()
     if error: st.error(error)
 
-    # --- SIDEBAR DIAGNOSTIC ---
-    st.sidebar.header("🔍 Diagnostic API")
+    # Sidebar
+    st.sidebar.header("⚙️ Configuration")
     api_v = st.sidebar.radio("Version API", ["v1", "v1beta"], index=0)
+    selected_model = st.sidebar.text_input("Modèle", "gemini-1.5-flash")
     
-    if st.sidebar.button("📋 Lister les modèles disponibles"):
-        models = list_available_models(api_v)
-        st.sidebar.info("Modèles détectés :")
-        for m in models:
-            st.sidebar.code(m)
-
-    st.sidebar.divider()
-    
-    # Champ de saisie manuel pour le modèle
-    selected_model = st.sidebar.text_input("Modèle à utiliser (ex: gemini-1.5-flash)", "gemini-1.5-flash")
-    
-    # --- LOGIQUE DE GÉNÉRATION ---
     if df is not None:
-        # Détection de la colonne système
         system_col = 'system' if 'system' in df.columns else df.columns[0]
         systems = ["Tous"] + sorted(df[system_col].dropna().unique().tolist())
-        choice = st.sidebar.selectbox("Filtrer par système", systems)
+        choice = st.sidebar.selectbox("Système", systems)
 
-        if st.sidebar.button("🎲 Générer un nouveau Cas"):
+        if st.sidebar.button("🎲 Générer un Cas Réel"):
             subset = df if choice == "Tous" else df[df[system_col] == choice]
             if not subset.empty:
                 row = subset.sample(1).iloc[0]
                 st.session_state.case_info = row.to_dict()
-                with st.spinner(f"Interrogation de {selected_model}..."):
+                with st.spinner("L'IA filtre et rédige le cas..."):
                     res = generate_osce_content(row.get('title', 'Pathologie'), selected_model, api_v)
                     st.session_state.full_osce = res
                 st.session_state.reveal = False
-            else:
-                st.warning("Aucun cas trouvé.")
-    
-    # --- AFFICHAGE ---
+
     if 'full_osce' in st.session_state:
-        st.markdown(st.session_state.full_osce)
+        # Affichage scindé
+        text = st.session_state.full_osce
+        if "### MARKING GUIDE" in text:
+            parts = text.split("### MARKING GUIDE")
+            enonce, correction = parts[0], "### MARKING GUIDE" + parts[1]
+        else:
+            enonce, correction = text, ""
+
+        st.markdown(enonce)
         st.divider()
-        if st.button("🔓 Voir les infos sources"):
-            diag_title = st.session_state.case_info.get('title', "Inconnu")
-            st.write(f"**Diagnostic original :** {diag_title}")
-            # Ici on utilise des guillemets doubles pour éviter l'erreur sur "d'URL"
-            url_val = st.session_state.case_info.get('url', "Pas d'URL disponible")
-            st.write(f"**URL :** {url_val}")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔓 Révéler le Barème"):
+                st.session_state.reveal = True
+        
+        if st.session_state.get('reveal'):
+            st.success(correction)
+            with st.expander("Source Radiopaedia"):
+                st.write(f"**Titre original :** {st.session_state.case_info.get('title')}")
+                st.write(f"**URL :** {st.session_state.case_info.get('url')}")
 
 if __name__ == "__main__":
     main()
