@@ -12,7 +12,7 @@ st.set_page_config(page_title="Radiology OSCE Diagnostic", page_icon="🩺", lay
 @st.cache_data(ttl=600)
 def load_data():
     if not FILE_ID: return None, "ID Excel manquant dans les Secrets."
-    url = f'https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx'
+    url = f"https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx"
     try:
         response = requests.get(url)
         df = pd.read_excel(io.BytesIO(response.content), engine='openpyxl')
@@ -29,7 +29,6 @@ def list_available_models(api_version):
         res = requests.get(url)
         if res.status_code == 200:
             models_data = res.json().get('models', [])
-            # On récupère le nom court (ex: gemini-1.5-flash)
             return [m['name'].split('/')[-1] for m in models_data]
         else:
             return [f"Erreur {res.status_code}: {res.text}"]
@@ -37,17 +36,22 @@ def list_available_models(api_version):
         return [f"Erreur technique : {str(e)}"]
 
 def generate_osce_content(case_title, model_name, api_version):
-    """Génère le cas OSCE"""
+    """Génère le cas OSCE structuré"""
     url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model_name}:generateContent?key={GEMINI_KEY}"
     
     prompt = f"""
     Tu es un examinateur expert en radiologie (OSCE). 
     Crée un cas d'examen réel pour le diagnostic : {case_title}.
     
-    Réponds en Français avec ce plan :
+    Réponds en Français avec ce plan strict :
     ### CLINICAL PRESENTATION
-    ### EXAMINATION QUESTIONS (5 questions)
-    ### MARKING GUIDE (Barème 0.5/1.0 pt)
+    (Contexte pour l'étudiant)
+    
+    ### EXAMINATION QUESTIONS
+    (5 questions précises)
+    
+    ### MARKING GUIDE
+    (Barème détaillé 0.5/1.0 pt)
     """
     
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -81,10 +85,11 @@ def main():
     st.sidebar.divider()
     
     # Champ de saisie manuel pour le modèle
-    selected_model = st.sidebar.text_input("Copier ici le nom du modèle (ex: gemini-1.5-flash)", "gemini-1.5-flash")
+    selected_model = st.sidebar.text_input("Modèle à utiliser (ex: gemini-1.5-flash)", "gemini-1.5-flash")
     
     # --- LOGIQUE DE GÉNÉRATION ---
     if df is not None:
+        # Détection de la colonne système
         system_col = 'system' if 'system' in df.columns else df.columns[0]
         systems = ["Tous"] + sorted(df[system_col].dropna().unique().tolist())
         choice = st.sidebar.selectbox("Filtrer par système", systems)
@@ -106,8 +111,11 @@ def main():
         st.markdown(st.session_state.full_osce)
         st.divider()
         if st.button("🔓 Voir les infos sources"):
-            st.write(f"**Diagnostic original :** {st.session_state.case_info.get('title')}")
-            st.write(f"**URL :** {st.session_state.case_info.get('url', 'Pas d'URL disponible')}")
+            diag_title = st.session_state.case_info.get('title', "Inconnu")
+            st.write(f"**Diagnostic original :** {diag_title}")
+            # Ici on utilise des guillemets doubles pour éviter l'erreur sur "d'URL"
+            url_val = st.session_state.case_info.get('url', "Pas d'URL disponible")
+            st.write(f"**URL :** {url_val}")
 
 if __name__ == "__main__":
     main()
