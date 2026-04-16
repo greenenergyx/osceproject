@@ -6,7 +6,6 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # --- CONFIGURATION ---
-# We use .get to prevent crashes if a secret is temporarily missing
 FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
 DB_ID = st.secrets.get("DATABASE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
@@ -54,7 +53,7 @@ def generate_osce_with_audit(title, system, model, api_v, difficulty):
     gen_prompt = f"""
     You are a Radiology Examiner. Create a formal OSCE case for: {title} ({system}).
     Format: Clinical Presentation, 5 Questions, Marking Guide with [0.5] points.
-    Ensure accuracy of imaging signals (e.g. fat, fluid, blood).
+    Ensure accuracy of imaging signals (e.g. fat, fluid, blood, gas).
     """
 
     try:
@@ -66,12 +65,13 @@ def generate_osce_with_audit(title, system, model, api_v, difficulty):
         audit_prompt = f"""
         You are a Senior Radiology Consultant. Audit this case for factual errors.
         Check specifically for MRI/CT signal characteristics and anatomical logic.
+        Example: Fat must be T1 hyperintense. Fluid must be T2 hyperintense.
         
         CASE: {draft}
         
         OUTPUT FORMAT:
         AUDIT_SCORE: [1-10]
-        AUDIT_FINDINGS: [List any errors, e.g. "Lipoma should be T1 hyperintense, not hypo"]
+        AUDIT_FINDINGS: [List any errors found]
         FINAL_CASE: [The complete corrected version]
         """
         res2 = requests.post(url, json={"contents": [{"parts": [{"text": audit_prompt}]}]}, timeout=20).json()
@@ -84,38 +84,50 @@ def generate_osce_with_audit(title, system, model, api_v, difficulty):
 # --- UI LOGIC ---
 def main():
     st.title("🩺 Radiology OSCE Simulator v5")
-    st.caption("Agentic Workflow: Draft -> Audit -> Correct")
+    st.caption("Agentic Workflow with Manual Topic Override")
 
     # Load Library
-    if not FILE_ID:
-        st.warning("Please set your EXCEL_DRIVE_ID in Secrets.")
-        return
-
-    url = f"https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx"
-    try:
-        res = requests.get(url)
-        df = pd.read_excel(io.BytesIO(res.content), engine='openpyxl')
-        df.columns = [c.strip().lower() for c in df.columns]
-    except:
-        st.error("Could not load Library Excel.")
-        return
+    df = None
+    if FILE_ID:
+        url = f"https://docs.google.com/spreadsheets/d/{FILE_ID}/export?format=xlsx"
+        try:
+            res = requests.get(url)
+            df = pd.read_excel(io.BytesIO(res.content), engine='openpyxl')
+            df.columns = [c.strip().lower() for c in df.columns]
+        except:
+            st.error("Could not load Library Excel.")
 
     # Sidebar
-    st.sidebar.header("Settings")
-    model = st.sidebar.text_input("Model ID", "gemini-1.5-pro") # Pro is better for auditing
-    diff = st.sidebar.select_slider("Level", ["High-Yield", "Intermediate", "Advanced"])
+    st.sidebar.header("Case Selection")
+    custom_topic = st.sidebar.text_input("Custom Topic (Optional)", help="Leave blank to use Library")
     
-    system_col = 'system' if 'system' in df.columns else df.columns[0]
-    choice = st.sidebar.selectbox("System", ["All"] + sorted(df[system_col].dropna().unique().tolist()))
+    if df is not None:
+        system_col = 'system' if 'system' in df.columns else df.columns[0]
+        choice = st.sidebar.selectbox("System (Library Only)", ["All"] + sorted(df[system_col].dropna().unique().tolist()))
+    
+    st.sidebar.divider()
+    st.sidebar.header("AI Settings")
+    model = st.sidebar.text_input("Model ID", "gemini-1.5-pro")
+    diff = st.sidebar.select_slider("Level", ["High-Yield", "Intermediate", "Advanced"])
 
     if st.sidebar.button("🎲 Generate & Audit Case"):
-        subset = df if choice == "All" else df[df[system_col] == choice]
-        row = subset.sample(1).iloc[0]
-        st.session_state.current_title = row.get('title', 'Pathology')
+        # Logic: Priority to Custom Topic, then Library
+        if custom_topic:
+            st.session_state.current_title = custom_topic
+            current_system = "Custom"
+        elif df is not None:
+            subset = df if choice == "All" else df[df[system_col] == choice]
+            row = subset.sample(1).iloc[0]
+            st.session_state.current_title = row.get('title', 'Pathology')
+            current_system = row.get(system_col, 'General')
+            st.session_state.case_info = row.to_dict()
+        else:
+            st.error("No topic provided and Library unavailable.")
+            return
         
-        with st.spinner("🔍 Agent 1: Drafting... Agent 2: Auditing accuracy..."):
+        with st.spinner(f"🔍 Drafting & Auditing: {st.session_state.current_title}..."):
             st.session_state.full_response = generate_osce_with_audit(
-                st.session_state.current_title, row.get(system_col, 'General'), model, "v1beta", diff
+                st.session_state.current_title, current_system, model, "v1beta", diff
             )
         st.session_state.reveal = False
 
@@ -124,12 +136,12 @@ def main():
         raw = st.session_state.full_response
         
         if "ERROR_STOP" in raw:
-            st.error(raw)
+            st.error(f"Generation failed: {raw}")
         else:
             # Parse the Audit Report
             if "FINAL_CASE:" in raw:
                 report, case = raw.split("FINAL_CASE:")
-                with st.expander("🛡️ Clinical Audit Report (Internal Review)", expanded=True):
+                with st.expander("🛡️ Clinical Audit Report", expanded=True):
                     st.info(report.strip())
                 display_text = case.strip()
             else:
@@ -143,7 +155,7 @@ def main():
             rating = st.feedback("stars")
             if rating is not None:
                 save_to_sheets(st.session_state.current_title, display_text, rating+1)
-                st.toast("Saved to Database!")
+                st.toast("Feedback saved!")
 
             if st.button("🔓 Reveal Marking Guide"):
                 st.session_state.reveal = True
