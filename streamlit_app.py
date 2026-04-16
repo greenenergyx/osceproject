@@ -24,31 +24,33 @@ def load_data():
 
 def generate_osce_case(raw_title, system_name, model_name, difficulty):
     """Generates a high-yield OSCE case in English with filtering logic"""
+    if not GEMINI_KEY: return "Missing Gemini API Key."
+    
     url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={GEMINI_KEY}"
     
     prompt = f"""
     You are a Radiology Board Examiner. Create a formal OSCE case based on this topic: {raw_title}.
     
-    DIFFICULTY SETTING: {difficulty}
-    - If 'High-Yield': Focus on classic 'must-know' diagnoses (e.g., Sarcoidosis, Lymphoma, VHL, MSK fractures). 
-    - If the source '{raw_title}' is purely anatomical or a procedure (e.g., 'Radius' or 'Pneumonectomy'), YOU MUST convert it into a common clinical pathology (e.g., 'Colles Fracture' or 'Post-pneumonectomy syndrome').
+    DIFFICULTY/SPECIFICITY SETTING: {difficulty}
+    - If set to 'High-Yield': Focus on classic 'must-know' diagnoses (e.g., Sarcoidosis, Lymphoma, Renal Cell Carcinoma). 
+    - CRITICAL: If the source '{raw_title}' is purely anatomical (e.g., 'Bronchus') or a procedure, YOU MUST convert it into a common pathology/emergency related to that structure.
     
-    STRUCTURE (Strictly English):
+    OUTPUT FORMAT (Strictly English):
     ### 📝 CLINICAL PRESENTATION
-    Age, Sex, and one brief clinical symptom (e.g., '65yo Male, progressive dyspnea').
+    Provide Age, Sex, and one brief clinical symptom (e.g., '54yo Female, weight loss and night sweats').
     
     ### ❓ EXAMINATION QUESTIONS
-    1. Key imaging findings?
-    2. Most likely diagnosis?
-    3. Two relevant differential diagnoses?
-    4. One high-yield pathology/genetics question.
-    5. Next step in management?
+    1. Describe the key imaging findings.
+    2. What is the most likely diagnosis?
+    3. List two relevant differential diagnoses.
+    4. Provide one high-yield pathology or clinical association question.
+    5. What is the next best step in management?
     
     ### ✅ MARKING GUIDE
-    - Observations (1.0 pt): [Key findings]
-    - Diagnosis (1.0 pt): [Specific diagnosis]
-    - DDx (0.5 pt): [2 alternatives]
-    - Knowledge/Management (0.5 pt): [Key takeaway]
+    - Observations (1.0 pt): [Expected keywords]
+    - Diagnosis (1.0 pt): [The correct specific diagnosis]
+    - DDx (0.5 pt): [Two valid alternatives]
+    - Knowledge/Management (0.5 pt): [Key clinical takeaway]
     """
     
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -56,7 +58,7 @@ def generate_osce_case(raw_title, system_name, model_name, difficulty):
         response = requests.post(url, json=payload, timeout=20)
         res_json = response.json()
         if response.status_code != 200:
-            return f"API Error: {res_json.get('error', {}).get('message')}"
+            return f"API Error {response.status_code}: {res_json.get('error', {}).get('message')}"
         return res_json['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
         return f"Technical Error: {str(e)}"
@@ -70,10 +72,9 @@ def main():
         st.error(error)
         return
 
-    # --- SIDEBAR SETTINGS ---
+    # --- SIDEBAR ---
     st.sidebar.header("⚙️ Exam Settings")
     
-    # Model selection (Defaulting to 2.0-flash-lite)
     model_choice = st.sidebar.selectbox(
         "AI Model", 
         ["gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro"],
@@ -88,7 +89,6 @@ def main():
     
     st.sidebar.divider()
     
-    # Data Filtering
     system_col = 'system' if 'system' in df.columns else df.columns[0]
     systems = ["All Systems"] + sorted(df[system_col].dropna().unique().tolist())
     choice = st.sidebar.selectbox("Organ System", systems)
@@ -97,47 +97,51 @@ def main():
         subset = df if choice == "All Systems" else df[df[system_col] == choice]
         
         if not subset.empty:
-            # Picking a random starting point
             row = subset.sample(1).iloc[0]
-            st.session_state.current_title = row.get('title', 'Pathology')
             
-            with st.spinner(f"Refining case for {st.session_state.current_title}..."):
+            # Set variables for generation
+            case_title = row.get('title', 'Pathology')
+            case_system = row.get(system_col, 'General')
+            
+            # Store metadata in session state
+            st.session_state.current_case_title = case_title
+            st.session_state.case_info = row.to_dict()
+            
+            with st.spinner(f"AI is curating a {difficulty} case for {case_title}..."):
                 case_output = generate_osce_case(
-                    st.session_state.current_case_title := row.get('title'),
-                    row.get(system_col, 'General'),
+                    case_title,
+                    case_system,
                     model_choice,
                     difficulty
                 )
                 st.session_state.full_osce = case_output
             st.session_state.reveal = False
         else:
-            st.warning("No cases found for this system.")
+            st.warning("No cases found.")
 
-    # --- CASE DISPLAY ---
+    # --- DISPLAY ---
     if 'full_osce' in st.session_state:
         text = st.session_state.full_osce
         
-        # Split Prompt/Answer
+        # Split Prompt and Marking Guide
         if "### ✅ MARKING GUIDE" in text:
             parts = text.split("### ✅ MARKING GUIDE")
             exam_part, marking_part = parts[0], "### ✅ MARKING GUIDE" + parts[1]
         else:
-            exam_part, marking_part = text, "Marking guide unavailable."
+            exam_part, marking_part = text, "Marking guide not found."
 
         st.markdown(exam_part)
         st.divider()
         
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔓 Reveal Marking Guide"):
-                st.session_state.reveal = True
+        if st.button("🔓 Reveal Marking Guide"):
+            st.session_state.reveal = True
         
         if st.session_state.get('reveal'):
             st.success(marking_part)
-            with st.expander("Original Radiopaedia Source"):
-                st.write(f"**Original Title:** {st.session_state.current_case_title}")
-                # Handling 'd'URL' issue by avoiding it in English
-                st.write(f"**Link:** {st.session_state.get('case_info', {}).get('url', 'Not available')}")
+            with st.expander("Reference Source"):
+                st.write(f"**Source Topic:** {st.session_state.current_case_title}")
+                url_val = st.session_state.case_info.get('url', "No URL available")
+                st.write(f"**Radiopaedia Link:** {url_val}")
 
 if __name__ == "__main__":
     main()
