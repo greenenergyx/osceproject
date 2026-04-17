@@ -13,25 +13,25 @@ FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
 DB_ID = st.secrets.get("DATABASE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-st.set_page_config(page_title="Radiology OSCE Master v12", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Radiology OSCE Master v13", page_icon="🩺", layout="wide")
 
-# --- CLOUDFLARE BYPASS SCOUT (via DuckDuckGo) ---
+# --- TWO-STEP FULLSCREEN SCOUT ---
 def find_radiopaedia_case(query):
     """
-    Bypasses Radiopaedia's Cloudflare block by using an intermediary search engine 
-    to find the direct case link.
+    Step 1: Finds the base case URL.
+    Step 2: Scrapes the case page to find the specific Fullscreen Study URL.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
+    base_case_url = None
     
-    # Method 1: DuckDuckGo HTML Search (Bypasses Cloudflare)
+    # STEP 1A: DuckDuckGo Intermediary Search (Bypasses Bot Blockers)
     try:
         ddg_url = f"https://html.duckduckgo.com/html/?q=site:radiopaedia.org/cases+{query.replace(' ', '+')}"
         res = requests.get(ddg_url, headers=headers, timeout=10)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # Extract the real URL from DDG's redirect links
         for a in soup.find_all('a', class_='result__url'):
             href = a.get('href', '')
             parsed = urllib.parse.urlparse(href)
@@ -40,24 +40,37 @@ def find_radiopaedia_case(query):
             if 'uddg' in qs:
                 actual_url = qs['uddg'][0]
                 if '/cases/' in actual_url and '/articles/' not in actual_url:
-                    clean_url = actual_url.split('?')[0] # Strip language params
-                    return f"{clean_url}/studies?widget=true"
-    except Exception as e:
-        pass # If DDG fails, fall through to Method 2
-        
-    # Method 2: Direct Radiopaedia Fallback
-    try:
-        search_url = f"https://radiopaedia.org/search?q={query.replace(' ', '+')}&scope=cases"
-        response = requests.get(search_url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        link = soup.select_one('a[class*="search-result-case"]')
-        if link:
-            case_path = link['href'].split('?')[0]
-            return f"https://radiopaedia.org{case_path}/studies?widget=true"
+                    base_case_url = actual_url.split('?')[0] # Clean URL
+                    break
     except:
-        return None
+        pass
         
+    # STEP 1B: Radiopaedia Direct Fallback
+    if not base_case_url:
+        try:
+            search_url = f"https://radiopaedia.org/search?q={query.replace(' ', '+')}&scope=cases"
+            res = requests.get(search_url, headers=headers, timeout=10)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            link = soup.select_one('a[class*="search-result-case"]')
+            if link:
+                base_case_url = f"https://radiopaedia.org{link['href'].split('?')[0]}"
+        except:
+            pass
+
+    # STEP 2: Extract the Fullscreen Viewer Link from the Case Page
+    if base_case_url:
+        try:
+            page_res = requests.get(base_case_url, headers=headers, timeout=10)
+            page_soup = BeautifulSoup(page_res.text, 'html.parser')
+            
+            # Targeting the exact class from your provided HTML snippet
+            fullscreen_btn = page_soup.select_one('a.view-fullscreen-link')
+            
+            if fullscreen_btn and fullscreen_btn.has_attr('href'):
+                return f"https://radiopaedia.org{fullscreen_btn['href']}"
+        except Exception as e:
+            pass
+            
     return None
 
 # --- AGENTIC ENGINE ---
@@ -84,7 +97,8 @@ def generate_osce_with_audit(title, system, model, api_v, difficulty):
 
 # --- UI LOGIC ---
 def main():
-    st.title("🩺 Radiology OSCE Simulator v12")
+    st.title("🩺 Radiology OSCE Simulator v13")
+    st.caption("Now featuring the Interactive DICOM-style Stacks Viewer")
     
     # Load Library
     df = None
@@ -95,7 +109,7 @@ def main():
             df.columns = [c.strip().lower() for c in df.columns]
         except: pass
 
-    # Sidebar Selection
+    # Sidebar
     st.sidebar.header("Navigation")
     custom_topic = st.sidebar.text_input("Manual Topic Override")
     model = st.sidebar.text_input("Model ID", "gemini-1.5-pro")
@@ -113,7 +127,7 @@ def main():
             sys = "Gastrointestinal"
 
         st.session_state.current_title = topic
-        with st.spinner(f"🔍 Bypassing firewall & scouting images for: {topic}..."):
+        with st.spinner(f"🔍 Scouting Fullscreen Stacks for: {topic}..."):
             st.session_state.full_response = generate_osce_with_audit(topic, sys, model, "v1beta", "High-Yield")
             st.session_state.case_url = find_radiopaedia_case(topic)
             
@@ -157,14 +171,14 @@ def main():
                 st.toast("Feedback Saved!")
 
         with col_viewer:
-            st.subheader("🖼️ Interactive Stacks")
+            st.subheader("🖼️ Interactive Viewer")
             if st.session_state.get('case_url'):
-                st.link_button("Open Fullscreen Viewer ↗️", st.session_state.case_url)
-                # The widget URL prevents spoilers by hiding the diagnosis
+                # Display the direct Fullscreen link in the IFrame!
                 components.iframe(st.session_state.case_url, height=900, scrolling=True)
+                st.caption(f"Source URL: {st.session_state.case_url}")
             else:
-                st.error("⚠️ Scout Agent was blocked by security or no images exist.")
-                st.write(f"Try manually searching: [{st.session_state.current_title} on Radiopaedia](https://radiopaedia.org/search?q={st.session_state.current_title.replace(' ', '+')}&scope=cases)")
+                st.error("⚠️ Scout Agent could not find a playable stack for this topic.")
+                st.write(f"Manually search: [{st.session_state.current_title} on Radiopaedia](https://radiopaedia.org/search?q={st.session_state.current_title.replace(' ', '+')}&scope=cases)")
 
 if __name__ == "__main__":
     main()
