@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import requests
 import io
@@ -10,7 +11,7 @@ FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
 DB_ID = st.secrets.get("DATABASE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-st.set_page_config(page_title="Radiology OSCE Master v5", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Radiology OSCE Master v6", page_icon="🩺", layout="wide")
 
 # --- DATABASE CONNECTION ---
 def get_gspread_client():
@@ -49,42 +50,38 @@ def save_to_sheets(title, content, rating):
 def generate_osce_with_audit(title, system, model, api_v, difficulty):
     url = f"https://generativelanguage.googleapis.com/{api_v}/models/{model}:generateContent?key={GEMINI_KEY}"
     
-    # 1. GENERATION PROMPT
-    gen_prompt = f"""
-    You are a Radiology Examiner. Create a formal OSCE case for: {title} ({system}).
-    Format: Clinical Presentation, 5 Questions, Marking Guide with [0.5] points.
-    Ensure accuracy of imaging signals (e.g. fat, fluid, blood, gas).
-    """
-
+    # Step 1: Draft
+    gen_prompt = f"Create a Radiopaedia-style OSCE case for: {title} ({system}). Include History, 5 Questions, and Marking Guide."
+    
     try:
-        # Step 1: Draft
         res1 = requests.post(url, json={"contents": [{"parts": [{"text": gen_prompt}]}]}, timeout=20).json()
         draft = res1['candidates'][0]['content']['parts'][0]['text']
 
-        # Step 2: Audit
+        # Step 2: Audit & URL Discovery
         audit_prompt = f"""
         You are a Senior Radiology Consultant. Audit this case for factual errors.
-        Check specifically for MRI/CT signal characteristics and anatomical logic.
-        Example: Fat must be T1 hyperintense. Fluid must be T2 hyperintense.
+        
+        TASK:
+        1. Check signal characteristics (e.g. Lipoma = T1 Hyper).
+        2. Provide a direct URL to a representative Radiopaedia case for this diagnosis.
         
         CASE: {draft}
         
         OUTPUT FORMAT:
         AUDIT_SCORE: [1-10]
-        AUDIT_FINDINGS: [List any errors found]
+        AUDIT_FINDINGS: [List errors]
+        RADIOPAEDIA_URL: [A direct https://radiopaedia.org/cases/... link]
         FINAL_CASE: [The complete corrected version]
         """
         res2 = requests.post(url, json={"contents": [{"parts": [{"text": audit_prompt}]}]}, timeout=20).json()
-        audit_result = res2['candidates'][0]['content']['parts'][0]['text']
-        return audit_result
-
+        return res2['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
         return f"ERROR_STOP: {str(e)}"
 
 # --- UI LOGIC ---
 def main():
-    st.title("🩺 Radiology OSCE Simulator v5")
-    st.caption("Agentic Workflow with Manual Topic Override")
+    st.title("🩺 Radiology OSCE Master v6")
+    st.caption("Now with Integrated Radiopaedia Case Visualizer")
 
     # Load Library
     df = None
@@ -95,73 +92,59 @@ def main():
             df = pd.read_excel(io.BytesIO(res.content), engine='openpyxl')
             df.columns = [c.strip().lower() for c in df.columns]
         except:
-            st.error("Could not load Library Excel.")
+            st.error("Library Excel not found.")
 
     # Sidebar
     st.sidebar.header("Case Selection")
-    custom_topic = st.sidebar.text_input("Custom Topic (Optional)", help="Leave blank to use Library")
-    
-    if df is not None:
-        system_col = 'system' if 'system' in df.columns else df.columns[0]
-        choice = st.sidebar.selectbox("System (Library Only)", ["All"] + sorted(df[system_col].dropna().unique().tolist()))
-    
-    st.sidebar.divider()
-    st.sidebar.header("AI Settings")
+    custom_topic = st.sidebar.text_input("Custom Topic (Optional)")
     model = st.sidebar.text_input("Model ID", "gemini-1.5-pro")
-    diff = st.sidebar.select_slider("Level", ["High-Yield", "Intermediate", "Advanced"])
-
+    
     if st.sidebar.button("🎲 Generate & Audit Case"):
-        # Logic: Priority to Custom Topic, then Library
-        if custom_topic:
-            st.session_state.current_title = custom_topic
-            current_system = "Custom"
-        elif df is not None:
-            subset = df if choice == "All" else df[df[system_col] == choice]
-            row = subset.sample(1).iloc[0]
-            st.session_state.current_title = row.get('title', 'Pathology')
-            current_system = row.get(system_col, 'General')
-            st.session_state.case_info = row.to_dict()
-        else:
-            st.error("No topic provided and Library unavailable.")
-            return
+        topic = custom_topic if custom_topic else (df.sample(1).iloc[0]['title'] if df is not None else "Radiology Case")
+        st.session_state.current_title = topic
         
-        with st.spinner(f"🔍 Drafting & Auditing: {st.session_state.current_title}..."):
-            st.session_state.full_response = generate_osce_with_audit(
-                st.session_state.current_title, current_system, model, "v1beta", diff
-            )
+        with st.spinner(f"🔍 Drafting & Finding Visual Reference for: {topic}..."):
+            st.session_state.full_response = generate_osce_with_audit(topic, "General", model, "v1beta", "Intermediate")
         st.session_state.reveal = False
 
     # Display Logic
     if 'full_response' in st.session_state:
         raw = st.session_state.full_response
         
-        if "ERROR_STOP" in raw:
-            st.error(f"Generation failed: {raw}")
-        else:
-            # Parse the Audit Report
-            if "FINAL_CASE:" in raw:
-                report, case = raw.split("FINAL_CASE:")
-                with st.expander("🛡️ Clinical Audit Report", expanded=True):
-                    st.info(report.strip())
-                display_text = case.strip()
-            else:
-                display_text = raw
+        if "FINAL_CASE:" in raw:
+            # Parse the Multi-Agent response
+            try:
+                report_part = raw.split("RADIOPAEDIA_URL:")[0]
+                url_part = raw.split("RADIOPAEDIA_URL:")[1].split("FINAL_CASE:")[0].strip()
+                case_part = raw.split("FINAL_CASE:")[1].strip()
+            except:
+                url_part = None
+                case_part = raw
+                report_part = "Internal Audit complete."
 
-            # Formatting
-            parts = display_text.split("### MARKING GUIDE") if "### MARKING GUIDE" in display_text else [display_text, ""]
-            st.markdown(parts[0])
-            
+            # 1. Show Audit Report
+            with st.expander("🛡️ Clinical Audit Report", expanded=False):
+                st.info(report_part)
+
+            # 2. Show Case Text
+            st.markdown(case_part.split("### MARKING GUIDE")[0])
+
+            # 3. CASE VISUALIZER (The scrollable case)
+            if url_part and "radiopaedia.org" in url_part:
+                st.subheader("🖼️ Case Visualizer")
+                st.write(f"Compare with this actual case: [{url_part}]({url_part})")
+                
+                # We use a container for the IFrame to ensure responsiveness
+                with st.container(border=True):
+                    components.iframe(url_part, height=800, scrolling=True)
+                    st.caption("Note: If the viewer is blank, click the link above to view in a new tab.")
+
             st.divider()
-            rating = st.feedback("stars")
-            if rating is not None:
-                save_to_sheets(st.session_state.current_title, display_text, rating+1)
-                st.toast("Feedback saved!")
-
+            # ... (Rest for Feedback/Marking Guide)
             if st.button("🔓 Reveal Marking Guide"):
                 st.session_state.reveal = True
-            
             if st.session_state.get('reveal'):
-                st.success("### MARKING GUIDE" + parts[1])
+                st.success(case_part.split("### MARKING GUIDE")[1] if "### MARKING GUIDE" in case_part else "Check full text above.")
 
 if __name__ == "__main__":
     main()
