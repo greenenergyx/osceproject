@@ -12,52 +12,76 @@ FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
 DB_ID = st.secrets.get("DATABASE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-st.set_page_config(page_title="Radiology OSCE Master v10", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Radiology OSCE Master v11", page_icon="🩺", layout="wide")
 
-# --- RADIOPAEDIA SCOUT (Targeting First Case & Fullscreen) ---
+# --- IMPROVED RADIOPAEDIA SCOUT (Multi-Fallback) ---
 def find_radiopaedia_case(query):
     search_url = f"https://radiopaedia.org/search?q={query.replace(' ', '+')}&scope=cases"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
     try:
         response = requests.get(search_url, headers=headers)
+        if response.status_code != 200: return None
+        
         soup = BeautifulSoup(response.text, 'html.parser')
-        # Select the first result using a partial class match for stability
-        first_result = soup.select_one('a[class*="search-result-case"]')
-        if first_result:
-            case_path = first_result['href'].split('?')[0] # Strip lang params
-            # Transform into the Widget/Fullscreen viewer URL
+        
+        # Fallback 1: Specific class you provided
+        link = soup.select_one('a._7m7isk0')
+        
+        # Fallback 2: Any link with 'search-result-case' in class
+        if not link:
+            link = soup.select_one('a[class*="search-result-case"]')
+            
+        # Fallback 3: First link that looks like a case path
+        if not link:
+            links = soup.find_all('a', href=True)
+            for l in links:
+                if "/cases/" in l['href'] and "search" not in l['href']:
+                    link = l
+                    break
+                    
+        if link:
+            case_path = link['href'].split('?')[0]
+            # Constructing the WIDGET URL to hide the answer/title
+            # Pattern: /cases/case-name/studies?widget=true
             return f"https://radiopaedia.org{case_path}/studies?widget=true"
     except:
         return None
     return None
 
-# --- AGENTIC ENGINE (Restored v5 Auditing) ---
+# --- RESTORED AUDIT LOGIC (v5 Style) ---
 def generate_osce_with_audit(title, system, model, api_v, difficulty):
     url = f"https://generativelanguage.googleapis.com/{api_v}/models/{model}:generateContent?key={GEMINI_KEY}"
-    gen_prompt = f"Create a formal OSCE case for: {title} ({system}). Include Clinical Presentation, 5 Questions, and a Marking Guide with [0.5] points. Ensure accuracy of imaging signals."
     
+    gen_prompt = f"Create a formal OSCE case for: {title} ({system}). Include Clinical Presentation, 5 Questions, and a Marking Guide with [0.5] points."
+
     try:
+        # Step 1: Draft
         res1 = requests.post(url, json={"contents": [{"parts": [{"text": gen_prompt}]}]}).json()
         draft = res1['candidates'][0]['content']['parts'][0]['text']
-        
-        audit_prompt = f"""You are a Senior Radiology Consultant. Audit this case for factual errors.
+
+        # Step 2: Consultant Audit
+        audit_prompt = f"""
+        You are a Senior Radiology Consultant. Audit this case for factual errors.
         Check specifically for MRI/CT signal characteristics (e.g. Fat = T1 Hyper).
+        
         CASE: {draft}
+        
         OUTPUT FORMAT:
         AUDIT_SCORE: [1-10]
-        AUDIT_FINDINGS: [List errors]
-        FINAL_CASE: [The complete corrected version]"""
-        
+        AUDIT_FINDINGS: [List any errors]
+        FINAL_CASE: [The complete corrected version]
+        """
         res2 = requests.post(url, json={"contents": [{"parts": [{"text": audit_prompt}]}]}).json()
         return res2['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
         return f"ERROR_STOP: {str(e)}"
 
-# --- UI LOGIC ---
+# --- MAIN APP ---
 def main():
-    st.title("🩺 Radiology OSCE Simulator v10")
+    st.title("🩺 Radiology OSCE Master v11")
     
-    # Load Library
+    # Library Loading
     df = None
     if FILE_ID:
         try:
@@ -66,13 +90,12 @@ def main():
             df.columns = [c.strip().lower() for c in df.columns]
         except: pass
 
-    # Sidebar Selection
-    st.sidebar.header("Navigation")
-    custom_topic = st.sidebar.text_input("Manual Topic Override")
-    model = st.sidebar.text_input("Model ID", "gemini-1.5-pro")
+    # Sidebar
+    st.sidebar.header("Case Selection")
+    custom_topic = st.sidebar.text_input("Custom Topic Override")
+    model_id = st.sidebar.text_input("Model ID", "gemini-1.5-pro")
     
     if st.sidebar.button("🎲 Generate Board Case"):
-        # FALLBACK FIX: Instead of cholecystitis, pick from library or use override
         if custom_topic:
             topic = custom_topic
             sys = "Manual"
@@ -81,17 +104,19 @@ def main():
             topic = row['title']
             sys = row.get('system', 'General')
         else:
-            topic = "Renal Cell Carcinoma" # Last resort fallback
-            sys = "General"
+            topic = "Sigmoid Volvulus"
+            sys = "Gastrointestinal"
 
         st.session_state.current_title = topic
-        with st.spinner(f"🔍 Auditing facts & finding images for: {topic}..."):
-            st.session_state.full_response = generate_osce_with_audit(topic, sys, model, "v1beta", "High-Yield")
+        
+        with st.spinner(f"🔍 Consulting Senior Radiologist & Scouting Images for: {topic}..."):
+            st.session_state.full_response = generate_osce_with_audit(topic, sys, model_id, "v1beta", "High-Yield")
             st.session_state.case_url = find_radiopaedia_case(topic)
+            
         st.session_state.reveal = False
         st.session_state.rating_submitted = False
 
-    # Main Display
+    # Display
     if 'full_response' in st.session_state:
         raw = st.session_state.full_response
         
@@ -100,17 +125,17 @@ def main():
         except:
             report, display_text = "Audit findings integrated.", raw
 
-        # Split Questions from Answers for organized "Reveal"
+        # Separation for Clean UI
         if "### MARKING GUIDE" in display_text:
             questions, marking_guide = display_text.split("### MARKING GUIDE")
         else:
-            questions, marking_guide = display_text, "Guide not generated."
+            questions, marking_guide = display_text, "Guide not found."
 
-        col_text, col_viewer = st.columns([1, 1])
+        col_text, col_viewer = st.columns([1, 1.2]) # Slightly wider viewer
 
         with col_text:
-            st.subheader("📝 Clinical Vignette")
-            with st.expander("🛡️ Consultant Audit Report"):
+            st.subheader("📝 Clinical Scenario")
+            with st.expander("🛡️ Clinical Audit Results"):
                 st.info(report.strip())
             
             st.markdown(questions)
@@ -122,22 +147,23 @@ def main():
             if st.session_state.get('reveal'):
                 st.success("### ✅ MARKING GUIDE\n" + marking_guide)
 
-            # Intuitive Rating System
+            # Fixed Rating System
             st.write("---")
-            st.write("### Rate this Scenario")
-            star_val = st.select_slider("Select Stars", options=[1, 2, 3, 4, 5], value=5, key="stars")
-            if st.button("🚀 Submit Feedback"):
+            st.write("### Rate Quality")
+            star_val = st.select_slider("Select Stars", options=[1, 2, 3, 4, 5], value=5, key="stars_v11")
+            if st.button("🚀 Submit Rating"):
                 # Save logic here
-                st.toast("Feedback Saved!")
+                st.toast("Feedback Saved to Database!")
 
         with col_viewer:
-            st.subheader("🖼️ Interactive Stacks")
+            st.subheader("🖼️ Interactive Stacks (Diagnosis Hidden)")
             if st.session_state.get('case_url'):
-                st.link_button("Open Fullscreen ↗️", st.session_state.case_url)
-                # Displaying the Widget mode which hides the diagnosis title
+                st.link_button("Open Fullscreen (External) ↗️", st.session_state.case_url)
+                # IFrame targeting the 'widget' mode to strip the diagnosis title
                 components.iframe(st.session_state.case_url, height=900, scrolling=True)
             else:
-                st.warning("No interactive case found. Try a more specific term.")
+                st.warning("⚠️ Scout Agent failed to find a matching stack on Radiopaedia.")
+                st.write("Try refining the 'Custom Topic' or using a standard library case.")
 
 if __name__ == "__main__":
     main()
