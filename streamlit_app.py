@@ -13,22 +13,45 @@ FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
 DB_ID = st.secrets.get("DATABASE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-st.set_page_config(page_title="Radiology OSCE Master v17", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Radiology OSCE Master v18", page_icon="🩺", layout="wide")
 
-# --- WIDGET API SCOUT ---
-def find_radiopaedia_case(query):
-    """
-    Finds the base case URL, then queries Radiopaedia's /studies endpoint 
-    to extract the JSON study ID required for the interactive widget.
-    """
+# --- WIDGET API EXTRACTOR (With Googlebot Spoofing) ---
+def extract_study_url(base_url):
+    """Attempts to extract the study ID using Googlebot headers to bypass Cloudflare."""
+    # Strategy 1: Spoof Googlebot (Cloudflare usually whitelists this)
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json, text/plain, */*"
+        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+        "Accept": "application/json, text/html, */*"
     }
+    
+    # Try the API endpoint first
+    try:
+        res = requests.get(f"{base_url}/studies", headers=headers, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0:
+                return f"{base_url}/studies/{data[0]}?widget=true"
+    except: pass
+        
+    # Strategy 2: Try scraping the raw HTML page for the study ID
+    try:
+        res = requests.get(base_url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            match = re.search(r'/studies/(\d+)', res.text)
+            if match:
+                return f"{base_url}/studies/{match.group(1)}?widget=true"
+    except: pass
+        
+    # Failsafe: If Cloudflare absolutely blocks the backend, return the base URL anyway.
+    return base_url
+
+# --- SEARCH SCOUT ---
+def find_radiopaedia_case(query):
     search_query = f"site:radiopaedia.org/cases {query}"
     base_case_url = None
-    
-    # 1. DuckDuckGo Lite (Text-only bypass)
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    # 1. DuckDuckGo Lite
     try:
         res = requests.post("https://lite.duckduckgo.com/lite/", data={"q": search_query}, headers=headers, timeout=8)
         soup = BeautifulSoup(res.text, 'html.parser')
@@ -40,7 +63,7 @@ def find_radiopaedia_case(query):
                 break
     except: pass
 
-    # 2. Yahoo Search (Fallback)
+    # 2. Yahoo Search
     if not base_case_url:
         try:
             yahoo_url = f"https://search.yahoo.com/search?p={urllib.parse.quote(search_query)}"
@@ -54,20 +77,8 @@ def find_radiopaedia_case(query):
                     break
         except: pass
 
-    # 3. EXTRACTION WIDGET LOGIC
     if base_case_url:
-        try:
-            # Hit the endpoint to get the JSON array (e.g., [35822])
-            studies_url = f"{base_case_url}/studies"
-            studies_res = requests.get(studies_url, headers=headers, timeout=8)
-            
-            # Parse the array and grab the first ID
-            study_ids = studies_res.json() 
-            if study_ids and isinstance(study_ids, list):
-                # Build the perfect spoiler-free URL
-                return f"{base_case_url}/studies/{study_ids[0]}?widget=true"
-        except Exception as e:
-            pass
+        return extract_study_url(base_case_url)
 
     return None
 
@@ -95,7 +106,7 @@ def generate_osce_with_audit(title, system, model, api_v, difficulty):
 
 # --- UI LOGIC ---
 def main():
-    st.title("🩺 Radiology OSCE Simulator v17")
+    st.title("🩺 Radiology OSCE Simulator v18")
     
     df = None
     if FILE_ID:
@@ -127,17 +138,11 @@ def main():
         with st.spinner(f"🔍 Compiling clinical data and fetching DICOM stacks for: {topic}..."):
             st.session_state.full_response = generate_osce_with_audit(topic, sys, model, "v1beta", "High-Yield")
             
-            # --- Override Logic: Safely extract study ID if a manual URL is pasted ---
+            # Use direct URL if provided
             if direct_url and "radiopaedia.org/cases/" in direct_url:
                 clean_direct = re.search(r'(https?://radiopaedia\.org/cases/[a-zA-Z0-9-]+)', direct_url)
                 if clean_direct:
-                    base_url = clean_direct.group(1)
-                    try:
-                        headers = {"User-Agent": "Mozilla/5.0"}
-                        studies_res = requests.get(f"{base_url}/studies", headers=headers, timeout=8).json()
-                        st.session_state.case_url = f"{base_url}/studies/{studies_res[0]}?widget=true"
-                    except:
-                        st.session_state.case_url = None
+                    st.session_state.case_url = extract_study_url(clean_direct.group(1))
             else:
                 st.session_state.case_url = find_radiopaedia_case(topic)
             
@@ -181,12 +186,19 @@ def main():
 
         with col_viewer:
             st.subheader("🖼️ Interactive Stacks")
-            if st.session_state.get('case_url'):
-                st.link_button("Open Fullscreen Viewer ↗️", st.session_state.case_url)
-                components.iframe(st.session_state.case_url, height=900, scrolling=True)
+            found_url = st.session_state.get('case_url')
+            
+            if found_url:
+                if "widget=true" in found_url:
+                    st.link_button("Open Fullscreen Viewer ↗️", found_url)
+                    components.iframe(found_url, height=900, scrolling=True)
+                else:
+                    st.warning("⚠️ The Scout found the case, but Cloudflare blocked the embedded widget extraction.")
+                    st.link_button("Open Case in New Tab ↗️", found_url, type="primary")
+                    st.write("*(This happens when your server IP is temporarily rate-limited. Click the button above to view it externally).*")
             else:
-                st.error("⚠️ Stack extraction failed.")
-                st.write("Try pasting the case URL directly into the 'Direct Case Link' box in the sidebar!")
+                st.error("⚠️ Stack extraction failed completely.")
+                st.write("Try pasting the case URL directly into the 'Direct Case Link' box in the sidebar.")
 
 if __name__ == "__main__":
     main()
