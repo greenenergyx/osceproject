@@ -13,36 +13,36 @@ FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
 DB_ID = st.secrets.get("DATABASE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-st.set_page_config(page_title="Radiology OSCE Master v18", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Radiology OSCE Master v19", page_icon="🩺", layout="wide")
 
-# --- WIDGET API EXTRACTOR (With Googlebot Spoofing) ---
+# --- WIDGET API EXTRACTOR (Fixed to use Numeric rID) ---
 def extract_study_url(base_url):
-    """Attempts to extract the study ID using Googlebot headers to bypass Cloudflare."""
-    # Strategy 1: Spoof Googlebot (Cloudflare usually whitelists this)
+    """Extracts the exact numeric case path to prevent 'Quiz not available' errors."""
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-        "Accept": "application/json, text/html, */*"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
     
-    # Try the API endpoint first
     try:
-        res = requests.get(f"{base_url}/studies", headers=headers, timeout=8)
+        res = requests.get(base_url, headers=headers, timeout=10)
         if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, list) and len(data) > 0:
-                return f"{base_url}/studies/{data[0]}?widget=true"
-    except: pass
-        
-    # Strategy 2: Try scraping the raw HTML page for the study ID
-    try:
-        res = requests.get(base_url, headers=headers, timeout=8)
-        if res.status_code == 200:
-            match = re.search(r'/studies/(\d+)', res.text)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            
+            # Strategy 1: Find the exact Fullscreen button link
+            fullscreen_btn = soup.select_one('a.view-fullscreen-link')
+            if fullscreen_btn and fullscreen_btn.has_attr('href'):
+                # href will be something like "/cases/87785/studies/104237?lang=us"
+                clean_path = fullscreen_btn['href'].split('?')[0]
+                return f"https://radiopaedia.org{clean_path}?widget=true"
+            
+            # Strategy 2: Regex fallback looking for the exact numeric pattern
+            match = re.search(r'(/cases/\d+/studies/\d+)', res.text)
             if match:
-                return f"{base_url}/studies/{match.group(1)}?widget=true"
-    except: pass
+                return f"https://radiopaedia.org{match.group(1)}?widget=true"
+    except Exception as e: 
+        pass
         
-    # Failsafe: If Cloudflare absolutely blocks the backend, return the base URL anyway.
+    # Failsafe: Return the base URL if everything is blocked
     return base_url
 
 # --- SEARCH SCOUT ---
@@ -106,7 +106,7 @@ def generate_osce_with_audit(title, system, model, api_v, difficulty):
 
 # --- UI LOGIC ---
 def main():
-    st.title("🩺 Radiology OSCE Simulator v18")
+    st.title("🩺 Radiology OSCE Simulator v19")
     
     df = None
     if FILE_ID:
