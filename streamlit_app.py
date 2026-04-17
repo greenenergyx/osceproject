@@ -3,7 +3,6 @@ import streamlit.components.v1 as components
 import pandas as pd
 import requests
 import io
-import gspread
 import urllib.parse
 import re
 from google.oauth2.service_account import Credentials
@@ -14,51 +13,61 @@ FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
 DB_ID = st.secrets.get("DATABASE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-st.set_page_config(page_title="Radiology OSCE Master v16", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Radiology OSCE Master v17", page_icon="🩺", layout="wide")
 
-# --- UNIVERSAL SCOUT AGENT (Unblockable) ---
+# --- WIDGET API SCOUT ---
 def find_radiopaedia_case(query):
     """
-    Checks multiple search engines and uses Regex to extract the true Radiopaedia link.
+    Finds the base case URL, then queries Radiopaedia's /studies endpoint 
+    to extract the JSON study ID required for the interactive widget.
     """
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json, text/plain, */*"
     }
     search_query = f"site:radiopaedia.org/cases {query}"
+    base_case_url = None
     
-    # 1. DuckDuckGo Lite (Highly resilient text-only search)
+    # 1. DuckDuckGo Lite (Text-only bypass)
     try:
         res = requests.post("https://lite.duckduckgo.com/lite/", data={"q": search_query}, headers=headers, timeout=8)
         soup = BeautifulSoup(res.text, 'html.parser')
         for a in soup.find_all('a', href=True):
             href = urllib.parse.unquote(a['href'])
-            if 'radiopaedia.org/cases/' in href and '/articles/' not in href:
-                match = re.search(r'(https?://radiopaedia\.org/cases/[a-zA-Z0-9-]+)', href)
-                if match: return f"{match.group(1)}/studies?widget=true"
+            match = re.search(r'(https?://radiopaedia\.org/cases/[a-zA-Z0-9-]+)', href)
+            if match and '/articles/' not in href:
+                base_case_url = match.group(1)
+                break
     except: pass
 
-    # 2. Yahoo Search (Lenient scraping policies)
-    try:
-        yahoo_url = f"https://search.yahoo.com/search?p={urllib.parse.quote(search_query)}"
-        res = requests.get(yahoo_url, headers=headers, timeout=8)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        for a in soup.find_all('a', href=True):
-            href = urllib.parse.unquote(a['href'])
-            if 'radiopaedia.org/cases/' in href and '/articles/' not in href:
+    # 2. Yahoo Search (Fallback)
+    if not base_case_url:
+        try:
+            yahoo_url = f"https://search.yahoo.com/search?p={urllib.parse.quote(search_query)}"
+            res = requests.get(yahoo_url, headers=headers, timeout=8)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            for a in soup.find_all('a', href=True):
+                href = urllib.parse.unquote(a['href'])
                 match = re.search(r'(https?://radiopaedia\.org/cases/[a-zA-Z0-9-]+)', href)
-                if match: return f"{match.group(1)}/studies?widget=true"
-    except: pass
-        
-    # 3. Direct Radiopaedia Fallback
-    try:
-        rp_url = f"https://radiopaedia.org/search?q={urllib.parse.quote(query)}&scope=cases"
-        res = requests.get(rp_url, headers=headers, timeout=8)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        link = soup.select_one('a[class*="search-result-case"]')
-        if link:
-            clean_path = link['href'].split('?')[0]
-            return f"https://radiopaedia.org{clean_path}/studies?widget=true"
-    except: pass
+                if match and '/articles/' not in href:
+                    base_case_url = match.group(1)
+                    break
+        except: pass
+
+    # 3. EXTRACTION WIDGET LOGIC
+    if base_case_url:
+        try:
+            # Hit the endpoint to get the JSON array (e.g., [35822])
+            studies_url = f"{base_case_url}/studies"
+            studies_res = requests.get(studies_url, headers=headers, timeout=8)
+            
+            # Parse the array and grab the first ID
+            study_ids = studies_res.json() 
+            if study_ids and isinstance(study_ids, list):
+                # Build the perfect spoiler-free URL
+                return f"{base_case_url}/studies/{study_ids[0]}?widget=true"
+        except Exception as e:
+            pass
 
     return None
 
@@ -86,7 +95,7 @@ def generate_osce_with_audit(title, system, model, api_v, difficulty):
 
 # --- UI LOGIC ---
 def main():
-    st.title("🩺 Radiology OSCE Simulator v16")
+    st.title("🩺 Radiology OSCE Simulator v17")
     
     df = None
     if FILE_ID:
@@ -99,7 +108,7 @@ def main():
     # Sidebar Selection
     st.sidebar.header("Case Engine")
     custom_topic = st.sidebar.text_input("1. Manual Topic Override")
-    direct_url = st.sidebar.text_input("2. Direct Radiopaedia Link (Optional)", help="Paste a URL here to bypass the scout agent completely.")
+    direct_url = st.sidebar.text_input("2. Direct Case Link (Optional)", help="Paste a Radiopaedia case link here.")
     model = st.sidebar.text_input("AI Model ID", "gemini-1.5-pro")
     
     if st.sidebar.button("🎲 Generate Board Case"):
@@ -111,17 +120,24 @@ def main():
             topic = row['title']
             sys = row.get('system', 'General')
         else:
-            topic = "Acute Appendicitis"
+            topic = "Hepatocellular Carcinoma"
             sys = "Gastrointestinal"
 
         st.session_state.current_title = topic
-        with st.spinner(f"🔍 Scouting images & auditing clinical scenario for: {topic}..."):
+        with st.spinner(f"🔍 Compiling clinical data and fetching DICOM stacks for: {topic}..."):
             st.session_state.full_response = generate_osce_with_audit(topic, sys, model, "v1beta", "High-Yield")
             
-            # Use direct URL if provided, otherwise run the Scout
+            # --- Override Logic: Safely extract study ID if a manual URL is pasted ---
             if direct_url and "radiopaedia.org/cases/" in direct_url:
                 clean_direct = re.search(r'(https?://radiopaedia\.org/cases/[a-zA-Z0-9-]+)', direct_url)
-                st.session_state.case_url = f"{clean_direct.group(1)}/studies?widget=true" if clean_direct else None
+                if clean_direct:
+                    base_url = clean_direct.group(1)
+                    try:
+                        headers = {"User-Agent": "Mozilla/5.0"}
+                        studies_res = requests.get(f"{base_url}/studies", headers=headers, timeout=8).json()
+                        st.session_state.case_url = f"{base_url}/studies/{studies_res[0]}?widget=true"
+                    except:
+                        st.session_state.case_url = None
             else:
                 st.session_state.case_url = find_radiopaedia_case(topic)
             
@@ -169,10 +185,8 @@ def main():
                 st.link_button("Open Fullscreen Viewer ↗️", st.session_state.case_url)
                 components.iframe(st.session_state.case_url, height=900, scrolling=True)
             else:
-                st.error("⚠️ All scout agents were blocked by security headers.")
-                st.write(f"**Workaround:**")
-                st.write(f"1. Search [{st.session_state.current_title} on Radiopaedia](https://radiopaedia.org/search?q={st.session_state.current_title.replace(' ', '+')}&scope=cases)")
-                st.write(f"2. Copy the case URL and paste it into the **'Direct Radiopaedia Link'** box in the sidebar, then hit Generate.")
+                st.error("⚠️ Stack extraction failed.")
+                st.write("Try pasting the case URL directly into the 'Direct Case Link' box in the sidebar!")
 
 if __name__ == "__main__":
     main()
