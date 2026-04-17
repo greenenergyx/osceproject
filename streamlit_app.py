@@ -13,25 +13,21 @@ FILE_ID = st.secrets.get("EXCEL_DRIVE_ID", "")
 DB_ID = st.secrets.get("DATABASE_ID", "")
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-st.set_page_config(page_title="Radiology OSCE Master v21", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="Radiology OSCE Master v22", page_icon="🩺", layout="wide")
 
 # --- DATA EXTRACTION AGENT (Widget + Text Scraper) ---
 def extract_study_data(base_url):
-    """Extracts BOTH the fullscreen widget URL and the actual clinical text from the case page."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
-    
     widget_url = base_url
     scraped_context = ""
-    
     try:
         res = requests.get(base_url, headers=headers, timeout=10)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             
-            # --- 1. Extract Widget URL ---
             fullscreen_btn = soup.select_one('a.view-fullscreen-link')
             if fullscreen_btn and fullscreen_btn.has_attr('href'):
                 clean_path = fullscreen_btn['href'].split('?')[0]
@@ -40,7 +36,6 @@ def extract_study_data(base_url):
                 match = re.search(r'(/cases/\d+/studies/\d+)', res.text)
                 if match: widget_url = f"https://radiopaedia.org{match.group(1)}?widget=true"
 
-            # --- 2. Extract Clinical Text for the AI ---
             pres = soup.find(id='case-patient-presentation')
             if pres: scraped_context += f"CLINICAL PRESENTATION:\n{pres.get_text(' ', strip=True)}\n\n"
             
@@ -49,10 +44,7 @@ def extract_study_data(base_url):
             
             disc = soup.find(id='case-discussion')
             if disc: scraped_context += f"CASE DISCUSSION & DIAGNOSIS:\n{disc.get_text(' ', strip=True)}\n\n"
-            
-    except Exception: 
-        pass
-        
+    except Exception: pass
     return widget_url, scraped_context
 
 # --- SEARCH SCOUT ---
@@ -85,30 +77,29 @@ def find_radiopaedia_case(query):
                     break
         except: pass
 
-    if base_case_url:
-        return extract_study_data(base_case_url)
-
+    if base_case_url: return extract_study_data(base_case_url)
     return None, ""
 
-# --- DUAL-CONTEXT CONCORDANCE ENGINE ---
-def generate_osce_with_concordance(title, system, model, api_v, scraped_case_context, article_content):
+# --- TRACEABILITY CONCORDANCE ENGINE ---
+def generate_osce_with_traceability(title, system, model, api_v, scraped_case_context, article_content, article_url):
     url = f"https://generativelanguage.googleapis.com/{api_v}/models/{model}:generateContent?key={GEMINI_KEY}"
     
-    # Building the Dual-Context Injection
     context_injection = ""
     if scraped_case_context:
-        context_injection += f"\n--- 1. SPECIFIC PATIENT CASE (Use this strictly for the 'Clinical History' and 'Imaging Findings' questions) ---\n{scraped_case_context}\n"
+        context_injection += f"\n--- SOURCE 1: PATIENT CASE ---\n{scraped_case_context}\n"
     if article_content:
-        # Truncate article content to first 6000 chars to avoid token limits
-        context_injection += f"\n--- 2. RADIOPAEDIA ARTICLE MASTER DATA (Use this to build robust DDx, Pathology, Associations, and Management questions) ---\n{article_content[:6000]}\n"
+        # Give the AI the article text and the URL from your spreadsheet
+        context_injection += f"\n--- SOURCE 2: RADIOPAEDIA ARTICLE ---\nURL: {article_url}\nCONTENT:\n{article_content[:6000]}\n"
 
+    # Agent 1: The Drafter
     gen_prompt = f"""
-    You are a Senior Radiology Board Examiner. Create a rigorous, formal OSCE case for: {title} ({system}). 
+    You are a Radiology Examiner. Create a formal OSCE case for: {title} ({system}). 
     Format: Clinical Presentation, 5 Questions, and a Marking Guide with [0.5] / [1.0] point allocations.
     
-    CRITICAL INSTRUCTIONS:
-    - Base Question 1 (Findings) and the Clinical Presentation ONLY on the "SPECIFIC PATIENT CASE" data below.
-    - Base Questions 2-5 (Pathology, DDx, Syndromes, Management) on the rich "RADIOPAEDIA ARTICLE MASTER DATA" below.
+    CRITICAL RULES:
+    1. Base Q1 on SOURCE 1 (Patient Case).
+    2. Base Q2-Q5 STRICTLY on SOURCE 2 (Radiopaedia Article). 
+    3. You MUST append "[Source: {article_url}]" to every answer in the marking guide for Q2-Q5.
     
     {context_injection}
     """
@@ -117,16 +108,23 @@ def generate_osce_with_concordance(title, system, model, api_v, scraped_case_con
         res1 = requests.post(url, json={"contents": [{"parts": [{"text": gen_prompt}]}]}).json()
         draft = res1['candidates'][0]['content']['parts'][0]['text']
         
+        # Agent 2: The Evidence-Based Medicine (EBM) Auditor
         audit_prompt = f"""
-        You are an Audit Agent. Cross-reference this draft OSCE against the Patient Case to ensure no visual findings were hallucinated.
+        You are the Senior Traceability Auditor. Your job is to ruthlessly eliminate hallucinations.
         
-        PATIENT CASE: {scraped_case_context}
-        DRAFT OSCE: {draft}
+        TASK:
+        Read the DRAFT OSCE. Verify that EVERY fact in the Marking Guide answers for Q2-Q5 is explicitly stated in the "SOURCE 2: RADIOPAEDIA ARTICLE" text below.
+        If the draft includes outside knowledge (e.g., mentioning "RECIST criteria" when the article does not), you MUST delete that question and rewrite it using ONLY facts present in the text.
+        
+        ARTICLE TEXT TO VERIFY AGAINST:
+        {article_content[:6000]}
+        
+        DRAFT OSCE:
+        {draft}
         
         OUTPUT FORMAT:
-        AUDIT_SCORE: [1-10]
-        AUDIT_FINDINGS: [List contradictions fixed]
-        FINAL_CASE: [The complete, harmonized version]
+        EBM_AUDIT_REPORT: [List any facts you had to remove because they weren't in the text. If perfectly compliant, state "100% Traceable to source".]
+        FINAL_CASE: [The fully verified, corrected case with URL citations]
         """
         
         res2 = requests.post(url, json={"contents": [{"parts": [{"text": audit_prompt}]}]}).json()
@@ -136,10 +134,9 @@ def generate_osce_with_concordance(title, system, model, api_v, scraped_case_con
 
 # --- UI LOGIC ---
 def main():
-    st.title("🩺 Radiology OSCE Simulator v21")
-    st.caption("Dual-Context Engine: Grounded in Real Scans & Encyclopedic Articles")
+    st.title("🩺 Radiology OSCE Simulator v22")
+    st.caption("Evidence-Based Mode: Strictly Audited against Library Sources")
     
-    # Load Library
     df = None
     if FILE_ID:
         try:
@@ -148,64 +145,60 @@ def main():
             df.columns = [c.strip().lower() for c in df.columns]
         except: pass
 
-    # Sidebar Selection
     st.sidebar.header("Case Engine")
     custom_topic = st.sidebar.text_input("1. Manual Topic Override")
-    direct_url = st.sidebar.text_input("2. Direct Case Link (Optional)", help="Paste a Radiopaedia case link here.")
+    direct_url = st.sidebar.text_input("2. Direct Case Link (Optional)")
     model = st.sidebar.text_input("AI Model ID", "gemini-1.5-pro")
     
     if st.sidebar.button("🎲 Generate Board Case"):
-        
-        # Determine Topic and Extract Article Content
         article_content = ""
+        article_url = "General Knowledge"
+        
         if custom_topic:
             topic = custom_topic
             sys = "Manual"
-            # If manual, we don't have article content, AI will rely on its internal training for the facts
         elif df is not None:
             row = df.sample(1).iloc[0]
             topic = row['title']
             sys = row.get('system', 'General')
-            article_content = str(row.get('content', '')) # Pull the encyclopedia text!
+            article_content = str(row.get('content', ''))
+            article_url = str(row.get('url', '')) # PULLING URL FROM YOUR EXCEL SCRIPT
         else:
-            topic = "Glioblastoma"
-            sys = "Neuro"
+            topic = "Cholecystitis"
+            sys = "Gastrointestinal"
 
         st.session_state.current_title = topic
         
-        # 1. SCOUT & SCRAPE PATIENT CASE
-        with st.spinner(f"🔍 Extracting images and specific case findings for: {topic}..."):
+        with st.spinner(f"🔍 Extracting specific patient scan data for: {topic}..."):
             if direct_url and "radiopaedia.org/cases/" in direct_url:
                 clean_direct = re.search(r'(https?://radiopaedia\.org/cases/[a-zA-Z0-9-]+)', direct_url)
-                if clean_direct:
-                    widget_url, scraped_case = extract_study_data(clean_direct.group(1))
-                else:
-                    widget_url, scraped_case = None, ""
+                if clean_direct: widget_url, scraped_case = extract_study_data(clean_direct.group(1))
+                else: widget_url, scraped_case = None, ""
             else:
                 widget_url, scraped_case = find_radiopaedia_case(topic)
                 
             st.session_state.case_url = widget_url
             st.session_state.scraped_case = scraped_case
             st.session_state.article_content = article_content
+            st.session_state.article_url = article_url
 
-        # 2. GENERATE OSCE USING DUAL-CONTEXT
-        with st.spinner("🧠 Merging patient scan findings with encyclopedic article data..."):
-            st.session_state.full_response = generate_osce_with_concordance(
+        with st.spinner("⚖️ Auditing draft for hallucinations against Library CSV..."):
+            st.session_state.full_response = generate_osce_with_traceability(
                 topic, sys, model, "v1beta", 
                 st.session_state.scraped_case, 
-                st.session_state.article_content
+                st.session_state.article_content,
+                st.session_state.article_url
             )
             
         st.session_state.reveal = False
 
-    # Main Display
     if 'full_response' in st.session_state:
         raw = st.session_state.full_response
         
         try:
             report, display_text = raw.split("FINAL_CASE:")
         except:
-            report, display_text = "Audit findings integrated.", raw
+            report, display_text = "Traceability Audit complete.", raw
 
         if "### MARKING GUIDE" in display_text:
             questions, marking_guide = display_text.split("### MARKING GUIDE")
@@ -217,16 +210,13 @@ def main():
         with col_text:
             st.subheader("📝 Clinical Vignette")
             
-            with st.expander("🛡️ Data Engine Audit Log"):
-                st.info(report.strip())
+            with st.expander("⚖️ Traceability & EBM Audit Report"):
+                st.info(report.replace("EBM_AUDIT_REPORT:", "").strip())
                 st.divider()
-                st.caption("SOURCE 1: SPECIFIC PATIENT DATA (Scraped from Case)")
-                st.write(st.session_state.get("scraped_case", "No case data scraped."))
-                st.divider()
-                st.caption("SOURCE 2: LIBRARY ARTICLE DATA (Pulled from Database)")
-                # Show just a snippet of the article to prove it's working
-                art_snippet = st.session_state.get("article_content", "")[:300]
-                st.write(f"{art_snippet}..." if art_snippet else "No library article used.")
+                st.caption(f"📚 TRACED TO ARTICLE URL: {st.session_state.get('article_url', 'N/A')}")
+                st.caption("Excerpt used for validation:")
+                art_snippet = st.session_state.get("article_content", "")[:400]
+                st.write(f"{art_snippet}..." if art_snippet else "No reference library content provided.")
             
             st.markdown(questions)
             st.divider()
